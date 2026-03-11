@@ -33,7 +33,7 @@ public final class Player {
 	 * @return whether the player is MrX
 	 */
 	public boolean isMrX() { return piece.isMrX(); }
-	/**
+	/**a
 	 * @return whether the player is a detective
 	 */
 	public boolean isDetective() { return piece.isDetective(); }

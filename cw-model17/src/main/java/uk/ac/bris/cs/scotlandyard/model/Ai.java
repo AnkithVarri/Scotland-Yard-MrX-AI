@@ -15,6 +15,7 @@ import jakarta.annotation.Nonnull;
 public interface Ai {
 
 	/**
+	 *
 	 * @return the name of your AI, be creative
 	 */
 	@Nonnull String name();
