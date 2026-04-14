@@ -60,6 +60,8 @@ public interface Board {
 	@Nonnull ImmutableSet<Move> getAvailableMoves();
 
 
+
+
 	/**
 	 * Represents an on-going ScotlandYard game where moves by each player advances the game.
 	 */

@@ -1,0 +1,352 @@
+package uk.ac.bris.cs.scotlandyard.ui.ai;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import jakarta.annotation.Nonnull;
+
+import com.google.common.collect.ImmutableSet;
+import com.google.common.graph.ImmutableValueGraph;
+
+import io.atlassian.fugue.Pair;
+import uk.ac.bris.cs.scotlandyard.model.Ai;
+import uk.ac.bris.cs.scotlandyard.model.Board;
+import uk.ac.bris.cs.scotlandyard.model.Move;
+import uk.ac.bris.cs.scotlandyard.model.Piece;
+import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Ticket;
+import uk.ac.bris.cs.scotlandyard.model.ScotlandYard.Transport;
+
+public class MyAi implements Ai {
+
+	private static final double score_win = 1_000_000.0;
+	private static final double score_lose = -1_000_000.0;
+	private static final int unreachable = 10_000;
+
+	@Nonnull @Override public String name() {
+		return "reelSigma";
+	}
+
+	public int dijkstra(ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph, int start, int goal, Set<Integer> blocked) {
+		if (start == goal) {
+			return 0;
+		}
+		record Node(int v, int d) {}
+		PriorityQueue<Node> pq = new PriorityQueue<>(new Comparator<Node>() {
+			@Override
+			public int compare(Node a, Node b) {
+				return Integer.compare(a.d(), b.d());
+			}
+		});
+		Map<Integer, Integer> best = new HashMap<>();
+		pq.add(new Node(start, 0));
+		best.put(start, 0);
+		while (!pq.isEmpty()) {
+			Node cur = pq.poll();
+			if (cur.d != best.getOrDefault(cur.v, unreachable)) {
+				continue;
+			}
+			if (cur.v == goal) {
+				return cur.d;
+			}
+			for (int w : graph.adjacentNodes(cur.v)) {
+				if (w != goal && blocked.contains(w)) {
+					continue;
+				}
+				int nd = cur.d + 1;
+				if (nd < best.getOrDefault(w, unreachable)) {
+					best.put(w, nd);
+					pq.add(new Node(w, nd));
+				}
+			}
+		}
+		return unreachable;
+	}
+
+	public double score(Board.GameState state, int mrxLocation) {
+		if (isMrXCaught(state, mrxLocation)) {
+			return score_lose;
+		}
+
+		ImmutableValueGraph<Integer, ImmutableSet<Transport>> graph = state.getSetup().graph;
+		List<Integer> detDists = new ArrayList<>();
+		for (Piece p : state.getPlayers()) {
+			if (!p.isDetective()) {
+				continue;
+			}
+			Piece.Detective det = (Piece.Detective) p;
+			Optional<Integer> optLoc = state.getDetectiveLocation(det);
+			if (optLoc.isEmpty()) {
+				continue;
+			}
+			int loc = optLoc.get();
+			if (loc == mrxLocation) {
+				detDists.add(0);
+				continue;
+			}
+			Set<Integer> blocked = new HashSet<>();
+			for (Piece q : state.getPlayers()) {
+				if (q.isDetective() && q != det) {
+					Optional<Integer> otherLoc = state.getDetectiveLocation((Piece.Detective) q);
+					if (otherLoc.isPresent()) {
+						blocked.add(otherLoc.get());
+					}
+				}
+			}
+			int dist = dijkstra(graph, loc, mrxLocation, blocked);
+			detDists.add(dist);
+		}
+		if (detDists.isEmpty()) {
+			return score_win * 0.5;
+		}
+
+		int minD = unreachable;
+		for (int d : detDists) {
+			if (d < minD) {
+				minD = d;
+			}
+		}
+		if (minD == 0) {
+			return score_lose;
+		}
+		minD = Math.min(minD, 24);
+
+		List<Integer> capped = new ArrayList<>(detDists.size());
+		for (int d : detDists) {
+			capped.add(Math.min(d, unreachable));
+		}
+		Collections.sort(capped);
+		int secondMin;
+		if (capped.size() >= 2) {
+			secondMin = capped.get(1);
+		} else {
+			secondMin = minD;
+		}
+		secondMin = Math.min(secondMin, 24);
+
+		double pressure = 0.0;
+		for (int d : detDists) {
+			int dd = Math.min(d, 24);
+			pressure += 24.0 / (dd + 1.0);
+		}
+
+		int secrets = 0;
+		int doubles = 0;
+		Optional<Board.TicketBoard> mrxTickets = state.getPlayerTickets(Piece.MrX.MRX);
+		if (mrxTickets.isPresent()) {
+			Board.TicketBoard tb = mrxTickets.get();
+			secrets = tb.getCount(Ticket.SECRET);
+			doubles = tb.getCount(Ticket.DOUBLE);
+		}
+
+		double s = 0.0;
+		s += 95.0 * minD;
+		s += 35.0 * secondMin;
+		s -= 4.2 * pressure;
+		s += 14.0 * secrets;
+		s += 9.0 * doubles;
+		int far = 0;
+		for (int d : detDists) {
+			if (d >= 4) {
+				far++;
+			}
+		}
+		s += 5.0 * far;
+		s += graph.degree(mrxLocation) * 2.0;
+		return s;
+	}
+
+	public boolean isMrXCaught(Board state, int mrxLocation) {
+		for (Piece p : state.getPlayers()) {
+			if (p.isDetective()) {
+				if (state.getDetectiveLocation((Piece.Detective) p).orElse(-1) == mrxLocation) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static int mrXDestination(Move move) {
+		return move.accept(new Move.Visitor<>() {
+			@Override
+			public Integer visit(Move.SingleMove m) {
+				return m.destination;
+			}
+			@Override
+			public Integer visit(Move.DoubleMove m) {
+				return m.destination2;
+			}
+		});
+	}
+
+	private double Minimax(Board.GameState state, int mrxLocation, int mrXPliesToExpand, long deadlineNanos) {
+		if (System.nanoTime() > deadlineNanos) {
+			return score(state, mrxLocation);
+		}
+		if (!state.getWinner().isEmpty()) {
+			if (state.getWinner().contains(Piece.MrX.MRX)) {
+				return score_win;
+			}
+			return score_lose;
+		}
+		ImmutableSet<Move> moves = state.getAvailableMoves();
+		if (moves.isEmpty()) {
+			return score(state, mrxLocation);
+		}
+		Piece mover = moves.iterator().next().commencedBy();
+		List<Move> ordered = new ArrayList<>(moves);
+
+		if (mover.isMrX()) {
+			if (mrXPliesToExpand <= 0) {
+				return score(state, mrxLocation);
+			}
+			Collections.sort(ordered, new Comparator<Move>() {
+				@Override
+				public int compare(Move a, Move b) {
+					return Double.compare(heuristicMrXMove(state, mrxLocation, b), heuristicMrXMove(state, mrxLocation, a));
+				}
+			});
+			double best = score_lose;
+			for (Move m : ordered) {
+				int dest = mrXDestination(m);
+				double v = Minimax(state.advance(m), dest, mrXPliesToExpand - 1, deadlineNanos);
+				best = Math.max(best, v);
+			}
+			return best;
+		}
+
+		double best = score_win;
+		for (Move m : ordered) {
+			double v = Minimax(state.advance(m), mrxLocation, mrXPliesToExpand, deadlineNanos);
+			best = Math.min(best, v);
+		}
+		return best;
+	}
+
+	private double alphaBetaPrune(Board.GameState state, int mrxLocation, int mrXPliesToExpand, double alpha, double beta, long deadlineNanos) {
+		if (System.nanoTime() > deadlineNanos) {
+			return score(state, mrxLocation);
+		}
+		if (!state.getWinner().isEmpty()) {
+			if (state.getWinner().contains(Piece.MrX.MRX)) {
+				return score_win;
+			}
+			return score_lose;
+		}
+		ImmutableSet<Move> moves = state.getAvailableMoves();
+		if (moves.isEmpty()) {
+			return score(state, mrxLocation);
+		}
+		Piece mover = moves.iterator().next().commencedBy();
+		List<Move> ordered = new ArrayList<>(moves);
+
+		if (mover.isMrX()) {
+			if (mrXPliesToExpand <= 0) {
+				return score(state, mrxLocation);
+			}
+			Collections.sort(ordered, new Comparator<Move>() {
+				@Override
+				public int compare(Move a, Move b) {
+					return Double.compare(heuristicMrXMove(state, mrxLocation, b), heuristicMrXMove(state, mrxLocation, a));
+				}
+			});
+			double best = score_lose;
+			for (Move m : ordered) {
+				int dest = mrXDestination(m);
+				double v = alphaBetaPrune(state.advance(m), dest, mrXPliesToExpand - 1, alpha, beta, deadlineNanos);
+				best = Math.max(best, v);
+				alpha = Math.max(alpha, v);
+				if (beta <= alpha) {
+					break;
+				}
+			}
+			return best;
+		}
+
+		double best = score_win;
+		for (Move m : ordered) {
+			double v = alphaBetaPrune(state.advance(m), mrxLocation, mrXPliesToExpand, alpha, beta, deadlineNanos);
+			best = Math.min(best, v);
+			beta = Math.min(beta, v);
+			if (beta <= alpha) {
+				break;
+			}
+		}
+		return best;
+	}
+
+	private double heuristicMrXMove(Board.GameState state, int from, Move m) {
+		int to = mrXDestination(m);
+		ImmutableValueGraph<Integer, ImmutableSet<Transport>> g = state.getSetup().graph;
+		double h = g.degree(to);
+		for (Piece p : state.getPlayers()) {
+			if (p.isDetective()) {
+				Piece.Detective d = (Piece.Detective) p;
+				Optional<Integer> opt = state.getDetectiveLocation(d);
+				if (opt.isEmpty()) {
+					continue;
+				}
+				Set<Integer> blocked = new HashSet<>();
+				for (Piece q : state.getPlayers()) {
+					if (q.isDetective() && q != d) {
+						Optional<Integer> qLoc = state.getDetectiveLocation((Piece.Detective) q);
+						if (qLoc.isPresent()) {
+							blocked.add(qLoc.get());
+						}
+					}
+				}
+				h += Math.min(dijkstra(g, opt.get(), to, blocked), 30);
+			}
+		}
+		return h;
+	}
+
+	@Nonnull @Override public Move pickMove( @Nonnull Board board,  Pair<Long, TimeUnit> timeoutPair) {
+		List<Move> moves = board.getAvailableMoves().asList();
+		if (moves.isEmpty()) {
+			throw new IllegalStateException("No moves available");
+		}
+		if (!(board instanceof Board.GameState gameState)) {
+			return moves.get(0);
+		}
+
+		long deadline = System.nanoTime() + Math.max(timeoutPair.left() * timeoutPair.right().toNanos(1) - 80_000_000L, 10_000_000L);
+		int mrxLoc = moves.get(0).source();
+		List<Move> rootOrder = new ArrayList<>(moves);
+		Collections.sort(rootOrder, new Comparator<Move>() {
+			@Override
+			public int compare(Move a, Move b) {
+				return Double.compare(heuristicMrXMove(gameState, mrxLoc, b), heuristicMrXMove(gameState, mrxLoc, a));
+			}
+		});
+
+		Move bestMove = rootOrder.get(0);
+		double bestVal = score_lose;
+		for (Move m : rootOrder) {
+			if (System.nanoTime() > deadline) {
+				break;
+			}
+			try {
+				Board.GameState next = gameState.advance(m);
+				int dest = mrXDestination(m);
+				double v = alphaBetaPrune(next, dest, 0, score_lose, score_win, deadline);
+				if (v > bestVal) {
+					bestVal = v;
+					bestMove = m;
+				}
+			} catch (RuntimeException ignored) {
+				// skip
+			}
+		}
+		return bestMove;
+	}
+}
